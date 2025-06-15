@@ -1,0 +1,244 @@
+#pragma once
+
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <string.h>
+
+#define Kb (1024)
+#define Mb (1024 * Kb)
+
+typedef struct Arena {
+    uint8_t *mem;
+    size_t next;
+    size_t size;
+} Arena;
+
+Arena *arena_new(size_t size) {
+    Arena *arena = (Arena *)malloc(sizeof(Arena));
+    arena->mem = malloc(size);
+    arena->next = 0;
+    arena->size = size;
+    return arena;
+}
+
+void arena_destroy(Arena **arena) {
+    free((*arena)->mem);
+    free(*arena);
+    *arena = NULL;
+}
+
+uint8_t *arena_alloc(Arena *arena, size_t size) {
+    // Align next to 8 bytes for 64-bit alignment
+    arena->next = (arena->next + 7) & ~7;
+    uint8_t *mem = arena->mem + arena->next;
+    arena->next += size;
+    assert(arena->next <= arena->size);
+    memset(mem, 0, size);
+    return mem;
+}
+
+Arena *arena_subarena(Arena *arena, size_t size) {
+    Arena *subarena = (Arena *)arena_alloc(arena, sizeof(Arena));
+    uint8_t *data = arena_alloc(arena, size);
+    subarena->mem = (uint8_t *)arena->mem + arena->next;
+    subarena->next = 0;
+    subarena->size = size;
+    return subarena;
+}
+
+void arena_reset(Arena *arena) {
+    arena->next = 0;
+}
+
+Arena *temp_arena = NULL;
+
+
+typedef struct String {
+    uint8_t *data;
+    size_t size;
+} String;
+
+#define STRING_LITERAL(str) (String){.data = str, .size = sizeof(str) - 1}
+// Use %.*s to print a String or (data,size) pair. The .* means read width from arg
+#define STRINGF(str) (int)(str).size, (str).data
+
+String file_load(Arena *arena, const char *path) {
+    FILE *file;
+#ifdef _WIN32
+    if (fopen_s(&file, path, "rb") != 0) {
+        String empty = {NULL, 0};
+        return empty;
+    }
+#else
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        String empty = {NULL, 0};
+        return empty;
+    }
+#endif
+    fseek(file, 0, SEEK_END);
+    size_t size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    void *mem = arena_alloc(arena, size);
+    fread(mem, 1, size, file);
+    fclose(file);
+    String result = {mem, size};
+    return result;
+}
+
+String tprint(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    va_list args2;
+    va_copy(args2, args);
+    int size = vsnprintf(NULL, 0, format, args) + 1;
+    va_end(args);
+    char *buffer = (char *)arena_alloc(temp_arena, size);
+    vsnprintf(buffer, size, format, args2);
+    buffer[size - 1] = '\0';
+    va_end(args2);
+    return (String){.data = (uint8_t*)buffer, .size = size - 1};
+}
+
+bool file_exists(const char *path) {
+    FILE *file;
+#ifdef _WIN32
+    if (fopen_s(&file, path, "rb") != 0) {
+        return false;
+    }
+#else
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return false;
+    }
+#endif
+    fclose(file);
+    return true;
+}
+
+typedef struct TensorShape {
+    size_t *shape;
+    size_t rank;
+} TensorShape;
+
+typedef struct Tensor {
+    float *data;
+    TensorShape shape;
+} Tensor;
+
+
+TensorShape ten_shape_impl(size_t *sizes, size_t rank) {
+    size_t *shape = (size_t *)arena_alloc(temp_arena, sizeof(size_t) * rank);
+    memcpy(shape, sizes, sizeof(size_t) * rank);
+    TensorShape result = {shape, rank};
+    return result;
+}
+
+#define ten_shape(first_dim, ...) ten_shape_impl((size_t[]){first_dim, __VA_ARGS__}, sizeof((size_t[]){first_dim, __VA_ARGS__}) / sizeof(size_t))
+
+Tensor ten_new(Arena *arena, TensorShape shape) {
+    Tensor tensor = {NULL, {NULL, 0}};
+    size_t size = 1;
+    for (size_t i = 0; i < shape.rank; i++) {
+        size *= shape.shape[i];
+    }
+    tensor.data = (float *)arena_alloc(arena, sizeof(float) * size);
+    tensor.shape.rank = shape.rank;
+    tensor.shape.shape = (size_t*)arena_alloc(arena, sizeof(size_t) * shape.rank);
+    memcpy(tensor.shape.shape, shape.shape, sizeof(size_t) * shape.rank);
+    return tensor;
+}
+
+Tensor ten_index(Arena *arena, Tensor tensor, size_t index) {
+    Tensor result = tensor;
+    int stride = 1;
+    for(int i = 1; i < tensor.shape.rank; i++) {
+        stride *= tensor.shape.shape[i];
+    }
+    result.data = tensor.data + index * stride;
+    result.shape = (TensorShape){(size_t*)arena_alloc(arena, sizeof(size_t) * (tensor.shape.rank - 1)), tensor.shape.rank - 1};
+    for (size_t i = 1; i < tensor.shape.rank; i++) {
+        result.shape.shape[i - 1] = tensor.shape.shape[i];
+    }
+    return result;
+}
+
+typedef struct ByteStream {
+    void *stream;
+    bool corrupted;
+    void (*write)(void *stream, uint8_t *data, size_t size);
+    void (*read)(void *stream, uint8_t *data, size_t size);
+} ByteStream;
+
+void stream_read(ByteStream *stream, void *data, size_t size) {
+    if (stream->corrupted) {
+        return;
+    }
+    stream->read(stream->stream, (uint8_t *)data, size);
+}
+
+void stream_write(ByteStream *stream, void *data, size_t size) {
+    if (stream->corrupted) {
+        return;
+    }
+    stream->write(stream->stream, (uint8_t *)data, size);
+}
+
+uint32_t stream_read_uint32(ByteStream *stream) {
+    uint32_t result = 0;
+    stream_read(stream, (uint8_t *)&result, sizeof(uint32_t));
+    return result;
+}
+
+uint8_t stream_read_uint8(ByteStream *stream) {
+    uint8_t result = 0;
+    stream_read(stream, (uint8_t *)&result, sizeof(uint8_t));
+    return result;
+}
+
+uint32_t stream_read_uint32_bigendian(ByteStream *stream) {
+    uint32_t result = 0;
+    for(int i = 0; i < 4; i += 1) {
+        uint8_t byte = stream_read_uint8(stream);
+        result |= ((uint32_t)byte) << ((3 - i) * 8);
+    }
+    return result;
+}
+
+typedef struct StringStream {
+    String string;
+    size_t cursor;
+    String corrupted_message;
+} StringStream;
+
+void stream_string_read(void *stream, uint8_t *data, size_t size) {
+    StringStream *string_stream = (StringStream *)stream;
+    if (string_stream->cursor + size > string_stream->string.size) {
+        string_stream->corrupted_message = tprint("%zu bytes requested, but only %zu bytes available, cursor %zu", size, string_stream->string.size - string_stream->cursor, string_stream->cursor);
+        return;
+    }
+    memcpy(data, string_stream->string.data + string_stream->cursor, size);
+    string_stream->cursor += size;
+    assert(string_stream->cursor <= string_stream->string.size);
+}
+
+ByteStream stream_string(Arena *arena_for_stream, String from_string) {
+    StringStream *stream = (StringStream *)arena_alloc(arena_for_stream, sizeof(StringStream));
+    stream->string = from_string;
+    stream->cursor = 0;
+    ByteStream result = {
+        .corrupted = false,
+        .write = NULL,
+        .stream = stream,
+        .read = stream_string_read,
+    };
+    return result;
+}
