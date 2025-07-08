@@ -36,6 +36,9 @@ void arena_destroy(Arena **arena) {
 }
 
 uint8_t *arena_alloc(Arena *arena, size_t size) {
+    if(size == 0) {
+        return 0;
+    }
     // Align next to 8 bytes for 64-bit alignment
     arena->next = (arena->next + 7) & ~7;
     uint8_t *mem = arena->mem + arena->next;
@@ -167,6 +170,19 @@ Tensor ten_index(Arena *arena, Tensor tensor, size_t index) {
     result.shape = (TensorShape){(size_t*)arena_alloc(arena, sizeof(size_t) * (tensor.shape.rank - 1)), tensor.shape.rank - 1};
     for (size_t i = 1; i < tensor.shape.rank; i++) {
         result.shape.shape[i - 1] = tensor.shape.shape[i];
+    }
+    return result;
+}
+
+Tensor ten_matmul(Arena *arena, Tensor a, Tensor b) {
+    assert(a.shape.shape[a.shape.rank - 1] == b.shape.shape[0]);
+    Tensor result = ten_new(arena, ten_shape(a.shape.shape[0], b.shape.shape[1]));
+    for(int i = 0; i < a.shape.shape[0]; i++) {
+        for(int j = 0; j < b.shape.shape[1]; j++) {
+            for(int k = 0; k < a.shape.shape[1]; k++) {
+                result.data[i * b.shape.shape[1] + j] += a.data[i * a.shape.shape[1] + k] * b.data[k * b.shape.shape[1] + j];
+            }
+        }
     }
     return result;
 }
