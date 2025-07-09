@@ -375,3 +375,128 @@ void ten_xavier_init(Tensor tensor, int input_size) {
         tensor.data[i] = (2.0f * ((float)rand() / RAND_MAX) - 1.0f) * scale;
     }
 }
+
+// Batch matrix multiplication: batch of inputs with weights
+Tensor ten_batch_matmul(Arena *arena, Tensor batch_inputs, Tensor weights) {
+    // batch_inputs: (batch_size, input_dim)
+    // weights: (input_dim, output_dim)
+    // result: (batch_size, output_dim)
+    assert(batch_inputs.shape.rank == 2);
+    assert(weights.shape.rank == 2);
+    assert(batch_inputs.shape.shape[1] == weights.shape.shape[0]);
+    
+    int batch_size = batch_inputs.shape.shape[0];
+    int input_dim = batch_inputs.shape.shape[1];
+    int output_dim = weights.shape.shape[1];
+    
+    Tensor result = ten_new(arena, ten_shape(batch_size, output_dim));
+    
+    for (int b = 0; b < batch_size; b++) {
+        for (int j = 0; j < output_dim; j++) {
+            for (int k = 0; k < input_dim; k++) {
+                result.data[b * output_dim + j] += 
+                    batch_inputs.data[b * input_dim + k] * weights.data[k * output_dim + j];
+            }
+        }
+    }
+    return result;
+}
+
+// Add bias to batch of activations
+void ten_batch_add_bias(Tensor batch_activations, Tensor bias) {
+    // batch_activations: (batch_size, output_dim)
+    // bias: (output_dim,)
+    assert(batch_activations.shape.rank == 2);
+    assert(bias.shape.rank == 1);
+    assert(batch_activations.shape.shape[1] == bias.shape.shape[0]);
+    
+    int batch_size = batch_activations.shape.shape[0];
+    int output_dim = batch_activations.shape.shape[1];
+    
+    for (int b = 0; b < batch_size; b++) {
+        for (int j = 0; j < output_dim; j++) {
+            batch_activations.data[b * output_dim + j] += bias.data[j];
+        }
+    }
+}
+
+// Apply ReLU activation to batch of activations
+void ten_batch_relu(Tensor batch_activations) {
+    size_t size = ten_size(batch_activations);
+    for (size_t i = 0; i < size; i++) {
+        batch_activations.data[i] = relu(batch_activations.data[i]);
+    }
+}
+
+// Compute batch softmax loss for multiple samples
+float ten_batch_softmax_loss(Tensor batch_logits, int *correct_labels, int batch_size) {
+    float total_loss = 0.0f;
+    int num_classes = batch_logits.shape.shape[1];
+    
+    for (int b = 0; b < batch_size; b++) {
+        float max = batch_logits.data[b * num_classes + 0];
+        for (int i = 1; i < num_classes; i++) {
+            if (batch_logits.data[b * num_classes + i] > max) {
+                max = batch_logits.data[b * num_classes + i];
+            }
+        }
+        
+        float sum = 0.0f;
+        for (int i = 0; i < num_classes; i++) {
+            sum += expf(batch_logits.data[b * num_classes + i] - max);
+        }
+        
+        float log_sum = max + logf(sum);
+        total_loss -= (batch_logits.data[b * num_classes + correct_labels[b]] - log_sum);
+    }
+    
+    return total_loss;
+}
+
+// Compute batch softmax gradients
+Tensor ten_batch_softmax_gradients(Arena *arena, Tensor batch_logits, int *correct_labels, int batch_size) {
+    int num_classes = batch_logits.shape.shape[1];
+    Tensor gradients = ten_new(arena, batch_logits.shape);
+    
+    for (int b = 0; b < batch_size; b++) {
+        // Find max for numerical stability
+        float maxl = batch_logits.data[b * num_classes + 0];
+        for (int j = 1; j < num_classes; j++) {
+            if (batch_logits.data[b * num_classes + j] > maxl) {
+                maxl = batch_logits.data[b * num_classes + j];
+            }
+        }
+        
+        // Compute softmax probabilities
+        float sum_exp = 0.0f;
+        for (int j = 0; j < num_classes; j++) {
+            sum_exp += expf(batch_logits.data[b * num_classes + j] - maxl);
+        }
+        
+        // Compute gradients: softmax - one_hot
+        for (int j = 0; j < num_classes; j++) {
+            gradients.data[b * num_classes + j] = expf(batch_logits.data[b * num_classes + j] - maxl) / sum_exp;
+        }
+        gradients.data[b * num_classes + correct_labels[b]] -= 1.0f;
+    }
+    
+    return gradients;
+}
+
+// Count correct predictions in a batch
+int ten_batch_count_correct(Tensor batch_logits, int *correct_labels, int batch_size) {
+    int correct = 0;
+    int num_classes = batch_logits.shape.shape[1];
+    
+    for (int b = 0; b < batch_size; b++) {
+        int pred = 0;
+        for (int i = 1; i < num_classes; i++) {
+            if (batch_logits.data[b * num_classes + i] > batch_logits.data[b * num_classes + pred]) {
+                pred = i;
+            }
+        }
+        if (pred == correct_labels[b]) correct++;
+    }
+    
+    return correct;
+}

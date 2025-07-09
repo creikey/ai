@@ -151,87 +151,120 @@ int main(int argc, char **argv) {
     ten_xavier_init(W2, hidden_size);
     ten_zero(b2);
 
-    // --- Training loop ---
-    int epochs = 5;
-    float lr = 0.001f;  // Reduced learning rate for stability
+    // --- Training loop with batching ---
+    int epochs = 3;
+    float lr = 0.001f;
+    int batch_size = 32; // Batch size for training
     float best_acc = 0.0f;
+    
     for (int epoch = 0; epoch < epochs; epoch++) {
         float loss = 0.0f;
         int correct = 0;
-        for (int i = 0; i < actual_train_count; i++) {
-            Tensor x = ten_index(temp_arena, X_train, i); // (784,)
-            Tensor y = ten_index(temp_arena, y_train, i); // (10,)
+        
+        // Process training data in batches
+        for (int batch_start = 0; batch_start < actual_train_count; batch_start += batch_size) {
+            int current_batch_size = (batch_start + batch_size <= actual_train_count) ? 
+                                   batch_size : actual_train_count - batch_start;
             
-            // Forward pass
-            // Layer 1: hidden = relu(x * W1 + b1)
-            Tensor hidden = ten_new(temp_arena, ten_shape(hidden_size));
-            for (int j = 0; j < hidden_size; j++) {
-                for (int k = 0; k < input_size; k++) {
-                    hidden.data[j] += x.data[k] * W1.data[k * hidden_size + j];
+            // Create batch tensors
+            Tensor batch_inputs = ten_new(temp_arena, ten_shape(current_batch_size, input_size));
+            Tensor batch_labels = ten_new(temp_arena, ten_shape(current_batch_size, num_classes));
+            int *batch_labels_int = (int*)arena_alloc(temp_arena, current_batch_size * sizeof(int));
+            
+            // Fill batch with data
+            for (int b = 0; b < current_batch_size; b++) {
+                int idx = batch_start + b;
+                Tensor x = ten_index(temp_arena, X_train, idx);
+                Tensor y = ten_index(temp_arena, y_train, idx);
+                Tensor batch_x = ten_index(temp_arena, batch_inputs, b);
+                Tensor batch_y = ten_index(temp_arena, batch_labels, b);
+                
+                // Copy input data
+                for (int j = 0; j < input_size; j++) {
+                    batch_x.data[j] = x.data[j];
                 }
-                hidden.data[j] += b1.data[j];
-            }
-            ten_relu(hidden); // Apply ReLU activation
-            
-            // Layer 2: logits = hidden * W2 + b2
-            Tensor logits_tensor = ten_new(temp_arena, ten_shape(num_classes));
-            for (int j = 0; j < num_classes; j++) {
-                for (int k = 0; k < hidden_size; k++) {
-                    logits_tensor.data[j] += hidden.data[k] * W2.data[k * num_classes + j];
+                
+                // Copy label data and get integer label
+                for (int j = 0; j < num_classes; j++) {
+                    batch_y.data[j] = y.data[j];
                 }
-                logits_tensor.data[j] += b2.data[j];
+                batch_labels_int[b] = ten_argmax(y);
             }
             
-            int label = ten_argmax(y);
-            // Loss (cross-entropy) using Tensor-based softmax
-            float logprob = ten_softmax_loss(logits_tensor, label);
-            loss -= logprob;
-            // Prediction using Tensor-based argmax
-            int pred = ten_argmax(logits_tensor);
-            if (pred == label) correct++;
+            // Forward pass - Layer 1: hidden = relu(batch_inputs * W1 + b1)
+            Tensor batch_hidden = ten_batch_matmul(temp_arena, batch_inputs, W1);
+            ten_batch_add_bias(batch_hidden, b1);
+            ten_batch_relu(batch_hidden);
             
-            // Backward pass
-            // Gradient wrt logits
-            Tensor grad_logits_tensor = ten_softmax_gradients(temp_arena, logits_tensor, label);
+            // Forward pass - Layer 2: logits = batch_hidden * W2 + b2
+            Tensor batch_logits = ten_batch_matmul(temp_arena, batch_hidden, W2);
+            ten_batch_add_bias(batch_logits, b2);
+            
+            // Compute loss and accuracy
+            float batch_loss = ten_batch_softmax_loss(batch_logits, batch_labels_int, current_batch_size);
+            loss += batch_loss;
+            correct += ten_batch_count_correct(batch_logits, batch_labels_int, current_batch_size);
+            
+            // Backward pass - Gradient wrt logits
+            Tensor grad_logits = ten_batch_softmax_gradients(temp_arena, batch_logits, batch_labels_int, current_batch_size);
             
             // Gradient wrt W2 and b2
             for (int j = 0; j < num_classes; j++) {
                 for (int k = 0; k < hidden_size; k++) {
-                    W2.data[k * num_classes + j] -= lr * grad_logits_tensor.data[j] * hidden.data[k];
+                    float grad_w2 = 0.0f;
+                    for (int b = 0; b < current_batch_size; b++) {
+                        grad_w2 += grad_logits.data[b * num_classes + j] * batch_hidden.data[b * hidden_size + k];
+                    }
+                    W2.data[k * num_classes + j] -= lr * grad_w2;
                 }
-                b2.data[j] -= lr * grad_logits_tensor.data[j];
+                
+                float grad_b2 = 0.0f;
+                for (int b = 0; b < current_batch_size; b++) {
+                    grad_b2 += grad_logits.data[b * num_classes + j];
+                }
+                b2.data[j] -= lr * grad_b2;
             }
             
             // Gradient wrt hidden layer (before ReLU)
-            Tensor grad_hidden = ten_new(temp_arena, ten_shape(hidden_size));
-            for (int j = 0; j < hidden_size; j++) {
-                for (int k = 0; k < num_classes; k++) {
-                    grad_hidden.data[j] += grad_logits_tensor.data[k] * W2.data[j * num_classes + k];
+            Tensor grad_hidden = ten_new(temp_arena, ten_shape(current_batch_size, hidden_size));
+            for (int b = 0; b < current_batch_size; b++) {
+                for (int j = 0; j < hidden_size; j++) {
+                    for (int k = 0; k < num_classes; k++) {
+                        grad_hidden.data[b * hidden_size + j] += 
+                            grad_logits.data[b * num_classes + k] * W2.data[j * num_classes + k];
+                    }
                 }
             }
             
             // Apply ReLU gradient to hidden layer gradients
-            Tensor hidden_before_relu = ten_new(temp_arena, ten_shape(hidden_size));
-            for (int j = 0; j < hidden_size; j++) {
-                for (int k = 0; k < input_size; k++) {
-                    hidden_before_relu.data[j] += x.data[k] * W1.data[k * hidden_size + j];
-                }
-                hidden_before_relu.data[j] += b1.data[j];
-            }
+            Tensor batch_hidden_before_relu = ten_batch_matmul(temp_arena, batch_inputs, W1);
+            ten_batch_add_bias(batch_hidden_before_relu, b1);
             
-            // Apply ReLU gradient
-            for (int j = 0; j < hidden_size; j++) {
-                grad_hidden.data[j] *= relu_gradient(hidden_before_relu.data[j]);
+            for (int b = 0; b < current_batch_size; b++) {
+                for (int j = 0; j < hidden_size; j++) {
+                    grad_hidden.data[b * hidden_size + j] *= 
+                        relu_gradient(batch_hidden_before_relu.data[b * hidden_size + j]);
+                }
             }
             
             // Gradient wrt W1 and b1
             for (int j = 0; j < hidden_size; j++) {
                 for (int k = 0; k < input_size; k++) {
-                    W1.data[k * hidden_size + j] -= lr * grad_hidden.data[j] * x.data[k];
+                    float grad_w1 = 0.0f;
+                    for (int b = 0; b < current_batch_size; b++) {
+                        grad_w1 += grad_hidden.data[b * hidden_size + j] * batch_inputs.data[b * input_size + k];
+                    }
+                    W1.data[k * hidden_size + j] -= lr * grad_w1;
                 }
-                b1.data[j] -= lr * grad_hidden.data[j];
+                
+                float grad_b1 = 0.0f;
+                for (int b = 0; b < current_batch_size; b++) {
+                    grad_b1 += grad_hidden.data[b * hidden_size + j];
+                }
+                b1.data[j] -= lr * grad_b1;
             }
         }
+        
         float acc = (float)correct / actual_train_count;
         printf("Epoch %d: loss=%.4f, acc=%.4f\n", epoch+1, loss/actual_train_count, acc);
         
