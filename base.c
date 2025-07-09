@@ -258,3 +258,69 @@ ByteStream stream_string(Arena *arena_for_stream, String from_string) {
     };
     return result;
 }
+
+// Tensor utility functions for perceptron
+int ten_argmax(Tensor tensor) {
+    int idx = 0;
+    for (int i = 1; i < tensor.shape.shape[0]; i++) {
+        if (tensor.data[i] > tensor.data[idx]) idx = i;
+    }
+    return idx;
+}
+
+float ten_softmax_loss(Tensor logits, int correct_label) {
+    float max = logits.data[0];
+    for (int i = 1; i < logits.shape.shape[0]; i++) {
+        if (logits.data[i] > max) max = logits.data[i];
+    }
+    float sum = 0.0f;
+    for (int i = 0; i < logits.shape.shape[0]; i++) {
+        sum += expf(logits.data[i] - max);
+    }
+    float log_sum = max + logf(sum);
+    return logits.data[correct_label] - log_sum;
+}
+
+Tensor ten_softmax_gradients(Arena *arena, Tensor logits, int correct_label) {
+    Tensor gradients = ten_new(arena, logits.shape);
+    
+    // Find max for numerical stability
+    float maxl = logits.data[0];
+    for (int j = 1; j < logits.shape.shape[0]; j++) {
+        if (logits.data[j] > maxl) maxl = logits.data[j];
+    }
+    
+    // Compute softmax probabilities
+    float sum_exp = 0.0f;
+    for (int j = 0; j < logits.shape.shape[0]; j++) {
+        sum_exp += expf(logits.data[j] - maxl);
+    }
+    
+    // Compute gradients: softmax - one_hot
+    for (int j = 0; j < logits.shape.shape[0]; j++) {
+        gradients.data[j] = expf(logits.data[j] - maxl) / sum_exp;
+    }
+    gradients.data[correct_label] -= 1.0f;
+    
+    return gradients;
+}
+
+size_t ten_size(Tensor tensor) {
+    size_t size = 1;
+    for (size_t i = 0; i < tensor.shape.rank; i++) {
+        size *= tensor.shape.shape[i];
+    }
+    return size;
+}
+
+Tensor ten_reshape(Arena *arena, Tensor tensor, TensorShape new_shape) {
+    Tensor result = tensor;
+    result.shape = new_shape;
+    assert(ten_size(tensor) == ten_size(result));
+    return result;
+}
+
+Tensor ten_flatten(Arena *arena, Tensor tensor) {
+    TensorShape flat_shape = ten_shape(ten_size(tensor));
+    return ten_reshape(arena, tensor, flat_shape);
+}

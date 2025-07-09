@@ -1,3 +1,5 @@
+// test with clang perceptron.c && ./a.out and making sure the accuracy is above 90%
+
 #include <stdio.h>
 #include <time.h>
 #include <math.h>
@@ -5,21 +7,6 @@
 #include "base.c"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
-
-// Move helper functions outside main
-static float softmax(float *logits, int n, int correct) {
-    float max = logits[0];
-    for (int i = 1; i < n; i++) if (logits[i] > max) max = logits[i];
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) sum += expf(logits[i] - max);
-    float log_sum = max + logf(sum);
-    return logits[correct] - log_sum;
-}
-static int argmax(float *arr, int n) {
-    int idx = 0;
-    for (int i = 1; i < n; i++) if (arr[i] > arr[idx]) idx = i;
-    return idx;
-}
 
 int main(int argc, char **argv) {
     temp_arena = arena_new(1000 * Mb);
@@ -118,69 +105,77 @@ int main(int argc, char **argv) {
     Tensor flat_inputs = ten_new(flat_arena, ten_shape(train_count, input_size));
     for (int i = 0; i < train_count; i++) {
         Tensor img = ten_index(temp_arena, train_inputs, i);
+        Tensor flat_row = ten_index(temp_arena, flat_inputs, i);
         for (int row = 0; row < 28; row++) {
+            Tensor img_row = ten_index(temp_arena, img, row);
             for (int col = 0; col < 28; col++) {
-                flat_inputs.data[i * input_size + row * 28 + col] = ten_index(temp_arena, img, row).data[col];
+                flat_row.data[row * 28 + col] = img_row.data[col];
             }
         }
     }
 
     // Split into train and test sets
-    float *X_train = flat_inputs.data;
-    float *X_test = flat_inputs.data + actual_train_count * input_size;
-    float *y_train = train_labels.data;
-    float *y_test = train_labels.data + actual_train_count * num_classes;
+    Tensor X_train = flat_inputs;
+    Tensor X_test = ten_new(temp_arena, ten_shape(test_count, input_size));
+    Tensor y_train = train_labels;
+    Tensor y_test = ten_new(temp_arena, ten_shape(test_count, num_classes));
+    
+    // Copy test data to separate tensors
+    for (int i = 0; i < test_count; i++) {
+        Tensor src_row = ten_index(temp_arena, flat_inputs, actual_train_count + i);
+        Tensor dst_row = ten_index(temp_arena, X_test, i);
+        for (int j = 0; j < input_size; j++) {
+            dst_row.data[j] = src_row.data[j];
+        }
+        
+        Tensor src_label = ten_index(temp_arena, train_labels, actual_train_count + i);
+        Tensor dst_label = ten_index(temp_arena, y_test, i);
+        for (int j = 0; j < num_classes; j++) {
+            dst_label.data[j] = src_label.data[j];
+        }
+    }
 
-    // --- Perceptron weights and bias ---
-    float *W = (float*)arena_alloc(temp_arena, input_size * num_classes);
-    float *b = (float*)arena_alloc(temp_arena, num_classes);
+    // --- Perceptron weights and bias as Tensors ---
+    Tensor W = ten_new(temp_arena, ten_shape(input_size, num_classes));
+    Tensor b = ten_new(temp_arena, ten_shape(num_classes));
     // Initialize weights and bias
     srand(42);
-    for (int i = 0; i < input_size * num_classes; i++) W[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
-    for (int i = 0; i < num_classes; i++) b[i] = 0.0f;
-
-    // --- Helper functions ---
-    // (removed from here, now above main)
+    for (int i = 0; i < input_size * num_classes; i++) W.data[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+    for (int i = 0; i < num_classes; i++) b.data[i] = 0.0f;
 
     // --- Training loop ---
-    int epochs = 20;
-    float lr = 0.03f;
+    int epochs = 5;
+    float lr = 0.01f;
     float best_acc = 0.0f;
     for (int epoch = 0; epoch < epochs; epoch++) {
         float loss = 0.0f;
         int correct = 0;
         for (int i = 0; i < actual_train_count; i++) {
-            float *x = X_train + i * input_size;
-            float *y = y_train + i * num_classes;
+            Tensor x = ten_index(temp_arena, X_train, i); // (784,)
+            Tensor y = ten_index(temp_arena, y_train, i); // (10,)
             // Forward: logits = xW + b
-            float logits[10] = {0};
+            Tensor logits_tensor = ten_new(temp_arena, ten_shape(10));
             for (int j = 0; j < num_classes; j++) {
                 for (int k = 0; k < input_size; k++) {
-                    logits[j] += x[k] * W[k * num_classes + j];
+                    logits_tensor.data[j] += x.data[k] * W.data[k * num_classes + j];
                 }
-                logits[j] += b[j];
+                logits_tensor.data[j] += b.data[j];
             }
-            int label = argmax(y, num_classes);
-            // Loss (cross-entropy)
-            float logprob = softmax(logits, num_classes, label);
+            int label = ten_argmax(y);
+            // Loss (cross-entropy) using Tensor-based softmax
+            float logprob = ten_softmax_loss(logits_tensor, label);
             loss -= logprob;
-            // Prediction
-            int pred = argmax(logits, num_classes);
+            // Prediction using Tensor-based argmax
+            int pred = ten_argmax(logits_tensor);
             if (pred == label) correct++;
-            // Backward: gradient wrt logits
-            float grad_logits[10];
-            float sum_exp = 0.0f;
-            float maxl = logits[0];
-            for (int j = 1; j < num_classes; j++) if (logits[j] > maxl) maxl = logits[j];
-            for (int j = 0; j < num_classes; j++) sum_exp += expf(logits[j] - maxl);
-            for (int j = 0; j < num_classes; j++) grad_logits[j] = expf(logits[j] - maxl) / sum_exp;
-            grad_logits[label] -= 1.0f;
-            // Update weights and bias
+            // Backward: gradient wrt logits using Tensor-based softmax gradients
+            Tensor grad_logits_tensor = ten_softmax_gradients(temp_arena, logits_tensor, label);
+            // Update weights and bias using Tensor gradients
             for (int j = 0; j < num_classes; j++) {
                 for (int k = 0; k < input_size; k++) {
-                    W[k * num_classes + j] -= lr * grad_logits[j] * x[k];
+                    W.data[k * num_classes + j] -= lr * grad_logits_tensor.data[j] * x.data[k];
                 }
-                b[j] -= lr * grad_logits[j];
+                b.data[j] -= lr * grad_logits_tensor.data[j];
             }
         }
         float acc = (float)correct / actual_train_count;
@@ -188,26 +183,22 @@ int main(int argc, char **argv) {
         // Evaluate on test set
         int test_correct = 0;
         for (int i = 0; i < test_count; i++) {
-            float *x = X_test + i * input_size;
-            float *y = y_test + i * num_classes;
-            float logits[10] = {0};
+            Tensor x = ten_index(temp_arena, X_test, i);
+            Tensor y = ten_index(temp_arena, y_test, i);
+            Tensor logits_tensor = ten_new(temp_arena, ten_shape(10));
             for (int j = 0; j < num_classes; j++) {
                 for (int k = 0; k < input_size; k++) {
-                    logits[j] += x[k] * W[k * num_classes + j];
+                    logits_tensor.data[j] += x.data[k] * W.data[k * num_classes + j];
                 }
-                logits[j] += b[j];
+                logits_tensor.data[j] += b.data[j];
             }
-            int label = argmax(y, num_classes);
-            int pred = argmax(logits, num_classes);
+            int label = ten_argmax(y);
+            int pred = ten_argmax(logits_tensor);
             if (pred == label) test_correct++;
         }
         float test_acc = (float)test_correct / test_count;
         printf("Test accuracy: %.4f\n", test_acc);
         if (test_acc > best_acc) best_acc = test_acc;
-        if (test_acc >= 0.85f) {
-            printf("Reached 85%%+ accuracy!\n");
-            break;
-        }
     }
     printf("Best test accuracy: %.4f\n", best_acc);
     arena_destroy(&flat_arena);
