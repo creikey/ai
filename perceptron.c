@@ -140,8 +140,8 @@ int main(int argc, char **argv) {
     Tensor b = ten_new(temp_arena, ten_shape(num_classes));
     // Initialize weights and bias
     srand(42);
-    for (int i = 0; i < input_size * num_classes; i++) W.data[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
-    for (int i = 0; i < num_classes; i++) b.data[i] = 0.0f;
+    ten_rand(W, -0.05f, 0.05f);
+    ten_zero(b);
 
     // --- Training loop ---
     int epochs = 5;

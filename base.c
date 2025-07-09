@@ -324,3 +324,19 @@ Tensor ten_flatten(Arena *arena, Tensor tensor) {
     TensorShape flat_shape = ten_shape(ten_size(tensor));
     return ten_reshape(arena, tensor, flat_shape);
 }
+
+// Initialize tensor with zeros
+void ten_zero(Tensor tensor) {
+    size_t size = ten_size(tensor);
+    for (size_t i = 0; i < size; i++) {
+        tensor.data[i] = 0.0f;
+    }
+}
+
+// Initialize tensor with random values from min to max
+void ten_rand(Tensor tensor, float min, float max) {
+    size_t size = ten_size(tensor);
+    for (size_t i = 0; i < size; i++) {
+        tensor.data[i] = min + ((float)rand() / RAND_MAX) * (max - min);
+    }
+}

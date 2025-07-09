@@ -4,3 +4,5 @@ a.pdb
 a.out
 mnist/
 a.out.dSYM/
+idle_training/
+.DS_Store
