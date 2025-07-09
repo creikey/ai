@@ -340,3 +340,38 @@ void ten_rand(Tensor tensor, float min, float max) {
         tensor.data[i] = min + ((float)rand() / RAND_MAX) * (max - min);
     }
 }
+
+// ReLU activation function
+float relu(float x) {
+    return x > 0.0f ? x : 0.0f;
+}
+
+// Apply ReLU activation to a tensor in-place
+void ten_relu(Tensor tensor) {
+    size_t size = ten_size(tensor);
+    for (size_t i = 0; i < size; i++) {
+        tensor.data[i] = relu(tensor.data[i]);
+    }
+}
+
+// ReLU gradient (derivative)
+float relu_gradient(float x) {
+    return x > 0.0f ? 1.0f : 0.0f;
+}
+
+// Apply ReLU gradient to a tensor in-place
+void ten_relu_gradient(Tensor tensor) {
+    size_t size = ten_size(tensor);
+    for (size_t i = 0; i < size; i++) {
+        tensor.data[i] = relu_gradient(tensor.data[i]);
+    }
+}
+
+// Xavier/Glorot weight initialization for better training stability
+void ten_xavier_init(Tensor tensor, int input_size) {
+    float scale = sqrtf(2.0f / input_size);
+    size_t size = ten_size(tensor);
+    for (size_t i = 0; i < size; i++) {
+        tensor.data[i] = (2.0f * ((float)rand() / RAND_MAX) - 1.0f) * scale;
+    }
+}

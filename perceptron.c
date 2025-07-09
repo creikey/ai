@@ -93,8 +93,9 @@ int main(int argc, char **argv) {
     */
 
     // After MNIST loading, add perceptron implementation
-    // --- Perceptron parameters ---
+    // --- Neural Network parameters ---
     int input_size = 28 * 28;
+    int hidden_size = 128;  // Hidden layer size
     int num_classes = 10;
     int train_count = train_inputs.shape.shape[0];
     int test_count = train_count / 10; // 10% for test
@@ -135,17 +136,24 @@ int main(int argc, char **argv) {
         }
     }
 
-    // --- Perceptron weights and bias as Tensors ---
-    Tensor W = ten_new(temp_arena, ten_shape(input_size, num_classes));
-    Tensor b = ten_new(temp_arena, ten_shape(num_classes));
-    // Initialize weights and bias
+    // --- Neural Network weights and biases ---
+    // Layer 1: input -> hidden
+    Tensor W1 = ten_new(temp_arena, ten_shape(input_size, hidden_size));
+    Tensor b1 = ten_new(temp_arena, ten_shape(hidden_size));
+    // Layer 2: hidden -> output
+    Tensor W2 = ten_new(temp_arena, ten_shape(hidden_size, num_classes));
+    Tensor b2 = ten_new(temp_arena, ten_shape(num_classes));
+    
+    // Initialize weights and biases
     srand(42);
-    ten_rand(W, -0.05f, 0.05f);
-    ten_zero(b);
+    ten_xavier_init(W1, input_size);
+    ten_zero(b1);
+    ten_xavier_init(W2, hidden_size);
+    ten_zero(b2);
 
     // --- Training loop ---
     int epochs = 5;
-    float lr = 0.01f;
+    float lr = 0.001f;  // Reduced learning rate for stability
     float best_acc = 0.0f;
     for (int epoch = 0; epoch < epochs; epoch++) {
         float loss = 0.0f;
@@ -153,14 +161,27 @@ int main(int argc, char **argv) {
         for (int i = 0; i < actual_train_count; i++) {
             Tensor x = ten_index(temp_arena, X_train, i); // (784,)
             Tensor y = ten_index(temp_arena, y_train, i); // (10,)
-            // Forward: logits = xW + b
-            Tensor logits_tensor = ten_new(temp_arena, ten_shape(10));
-            for (int j = 0; j < num_classes; j++) {
+            
+            // Forward pass
+            // Layer 1: hidden = relu(x * W1 + b1)
+            Tensor hidden = ten_new(temp_arena, ten_shape(hidden_size));
+            for (int j = 0; j < hidden_size; j++) {
                 for (int k = 0; k < input_size; k++) {
-                    logits_tensor.data[j] += x.data[k] * W.data[k * num_classes + j];
+                    hidden.data[j] += x.data[k] * W1.data[k * hidden_size + j];
                 }
-                logits_tensor.data[j] += b.data[j];
+                hidden.data[j] += b1.data[j];
             }
+            ten_relu(hidden); // Apply ReLU activation
+            
+            // Layer 2: logits = hidden * W2 + b2
+            Tensor logits_tensor = ten_new(temp_arena, ten_shape(num_classes));
+            for (int j = 0; j < num_classes; j++) {
+                for (int k = 0; k < hidden_size; k++) {
+                    logits_tensor.data[j] += hidden.data[k] * W2.data[k * num_classes + j];
+                }
+                logits_tensor.data[j] += b2.data[j];
+            }
+            
             int label = ten_argmax(y);
             // Loss (cross-entropy) using Tensor-based softmax
             float logprob = ten_softmax_loss(logits_tensor, label);
@@ -168,30 +189,76 @@ int main(int argc, char **argv) {
             // Prediction using Tensor-based argmax
             int pred = ten_argmax(logits_tensor);
             if (pred == label) correct++;
-            // Backward: gradient wrt logits using Tensor-based softmax gradients
+            
+            // Backward pass
+            // Gradient wrt logits
             Tensor grad_logits_tensor = ten_softmax_gradients(temp_arena, logits_tensor, label);
-            // Update weights and bias using Tensor gradients
+            
+            // Gradient wrt W2 and b2
             for (int j = 0; j < num_classes; j++) {
-                for (int k = 0; k < input_size; k++) {
-                    W.data[k * num_classes + j] -= lr * grad_logits_tensor.data[j] * x.data[k];
+                for (int k = 0; k < hidden_size; k++) {
+                    W2.data[k * num_classes + j] -= lr * grad_logits_tensor.data[j] * hidden.data[k];
                 }
-                b.data[j] -= lr * grad_logits_tensor.data[j];
+                b2.data[j] -= lr * grad_logits_tensor.data[j];
+            }
+            
+            // Gradient wrt hidden layer (before ReLU)
+            Tensor grad_hidden = ten_new(temp_arena, ten_shape(hidden_size));
+            for (int j = 0; j < hidden_size; j++) {
+                for (int k = 0; k < num_classes; k++) {
+                    grad_hidden.data[j] += grad_logits_tensor.data[k] * W2.data[j * num_classes + k];
+                }
+            }
+            
+            // Apply ReLU gradient to hidden layer gradients
+            Tensor hidden_before_relu = ten_new(temp_arena, ten_shape(hidden_size));
+            for (int j = 0; j < hidden_size; j++) {
+                for (int k = 0; k < input_size; k++) {
+                    hidden_before_relu.data[j] += x.data[k] * W1.data[k * hidden_size + j];
+                }
+                hidden_before_relu.data[j] += b1.data[j];
+            }
+            
+            // Apply ReLU gradient
+            for (int j = 0; j < hidden_size; j++) {
+                grad_hidden.data[j] *= relu_gradient(hidden_before_relu.data[j]);
+            }
+            
+            // Gradient wrt W1 and b1
+            for (int j = 0; j < hidden_size; j++) {
+                for (int k = 0; k < input_size; k++) {
+                    W1.data[k * hidden_size + j] -= lr * grad_hidden.data[j] * x.data[k];
+                }
+                b1.data[j] -= lr * grad_hidden.data[j];
             }
         }
         float acc = (float)correct / actual_train_count;
         printf("Epoch %d: loss=%.4f, acc=%.4f\n", epoch+1, loss/actual_train_count, acc);
+        
         // Evaluate on test set
         int test_correct = 0;
         for (int i = 0; i < test_count; i++) {
             Tensor x = ten_index(temp_arena, X_test, i);
             Tensor y = ten_index(temp_arena, y_test, i);
-            Tensor logits_tensor = ten_new(temp_arena, ten_shape(10));
-            for (int j = 0; j < num_classes; j++) {
+            
+            // Forward pass for testing
+            Tensor hidden = ten_new(temp_arena, ten_shape(hidden_size));
+            for (int j = 0; j < hidden_size; j++) {
                 for (int k = 0; k < input_size; k++) {
-                    logits_tensor.data[j] += x.data[k] * W.data[k * num_classes + j];
+                    hidden.data[j] += x.data[k] * W1.data[k * hidden_size + j];
                 }
-                logits_tensor.data[j] += b.data[j];
+                hidden.data[j] += b1.data[j];
             }
+            ten_relu(hidden);
+            
+            Tensor logits_tensor = ten_new(temp_arena, ten_shape(num_classes));
+            for (int j = 0; j < num_classes; j++) {
+                for (int k = 0; k < hidden_size; k++) {
+                    logits_tensor.data[j] += hidden.data[k] * W2.data[k * num_classes + j];
+                }
+                logits_tensor.data[j] += b2.data[j];
+            }
+            
             int label = ten_argmax(y);
             int pred = ten_argmax(logits_tensor);
             if (pred == label) test_correct++;
