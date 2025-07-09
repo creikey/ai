@@ -169,7 +169,6 @@ int main(int argc, char **argv) {
             // Create batch tensors
             Tensor batch_inputs = ten_new(temp_arena, ten_shape(current_batch_size, input_size));
             Tensor batch_labels = ten_new(temp_arena, ten_shape(current_batch_size, num_classes));
-            int *batch_labels_int = (int*)arena_alloc(temp_arena, current_batch_size * sizeof(int));
             
             // Fill batch with data
             for (int b = 0; b < current_batch_size; b++) {
@@ -184,29 +183,52 @@ int main(int argc, char **argv) {
                     batch_x.data[j] = x.data[j];
                 }
                 
-                // Copy label data and get integer label
+                // Copy label data
                 for (int j = 0; j < num_classes; j++) {
                     batch_y.data[j] = y.data[j];
                 }
-                batch_labels_int[b] = ten_argmax(y);
             }
             
             // Forward pass - Layer 1: hidden = relu(batch_inputs * W1 + b1)
-            Tensor batch_hidden = ten_batch_matmul(temp_arena, batch_inputs, W1);
-            ten_batch_add_bias(batch_hidden, b1);
-            ten_batch_relu(batch_hidden);
+            Tensor batch_hidden = ten_matmul(temp_arena, batch_inputs, W1);
+            ten_add_bias(batch_hidden, b1);
+            ten_relu(batch_hidden);
             
             // Forward pass - Layer 2: logits = batch_hidden * W2 + b2
-            Tensor batch_logits = ten_batch_matmul(temp_arena, batch_hidden, W2);
-            ten_batch_add_bias(batch_logits, b2);
+            Tensor batch_logits = ten_matmul(temp_arena, batch_hidden, W2);
+            ten_add_bias(batch_logits, b2);
             
-            // Compute loss and accuracy
-            float batch_loss = ten_batch_softmax_loss(batch_logits, batch_labels_int, current_batch_size);
+            // Compute loss and accuracy using existing tensor operations
+            float batch_loss = 0.0f;
+            int batch_correct = 0;
+            for (int b = 0; b < current_batch_size; b++) {
+                Tensor sample_logits = ten_index(temp_arena, batch_logits, b);
+                Tensor sample_label = ten_index(temp_arena, batch_labels, b);
+                int label = ten_argmax(sample_label);
+                
+                float sample_loss = ten_softmax_loss(sample_logits, label);
+                batch_loss += sample_loss;
+                
+                int pred = ten_argmax(sample_logits);
+                if (pred == label) batch_correct++;
+            }
             loss += batch_loss;
-            correct += ten_batch_count_correct(batch_logits, batch_labels_int, current_batch_size);
+            correct += batch_correct;
             
             // Backward pass - Gradient wrt logits
-            Tensor grad_logits = ten_batch_softmax_gradients(temp_arena, batch_logits, batch_labels_int, current_batch_size);
+            Tensor grad_logits = ten_new(temp_arena, batch_logits.shape);
+            for (int b = 0; b < current_batch_size; b++) {
+                Tensor sample_logits = ten_index(temp_arena, batch_logits, b);
+                Tensor sample_label = ten_index(temp_arena, batch_labels, b);
+                int label = ten_argmax(sample_label);
+                
+                Tensor sample_grad = ten_softmax_gradients(temp_arena, sample_logits, label);
+                Tensor grad_slice = ten_index(temp_arena, grad_logits, b);
+                
+                for (int j = 0; j < num_classes; j++) {
+                    grad_slice.data[j] = sample_grad.data[j];
+                }
+            }
             
             // Gradient wrt W2 and b2
             for (int j = 0; j < num_classes; j++) {
@@ -237,13 +259,15 @@ int main(int argc, char **argv) {
             }
             
             // Apply ReLU gradient to hidden layer gradients
-            Tensor batch_hidden_before_relu = ten_batch_matmul(temp_arena, batch_inputs, W1);
-            ten_batch_add_bias(batch_hidden_before_relu, b1);
+            Tensor batch_hidden_before_relu = ten_matmul(temp_arena, batch_inputs, W1);
+            ten_add_bias(batch_hidden_before_relu, b1);
             
             for (int b = 0; b < current_batch_size; b++) {
+                Tensor hidden_slice = ten_index(temp_arena, batch_hidden_before_relu, b);
+                Tensor grad_slice = ten_index(temp_arena, grad_hidden, b);
+                
                 for (int j = 0; j < hidden_size; j++) {
-                    grad_hidden.data[b * hidden_size + j] *= 
-                        relu_gradient(batch_hidden_before_relu.data[b * hidden_size + j]);
+                    grad_slice.data[j] *= relu_gradient(hidden_slice.data[j]);
                 }
             }
             
