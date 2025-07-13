@@ -5,18 +5,14 @@
 #include <math.h>
 
 #include "base.c"
+#include "ai.c"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-int main(int argc, char **argv) {
-    temp_arena = arena_new(1000 * Mb);
+// x -> W * x -> + b -> softmax -> loss
 
-    Tensor a = ten_new(temp_arena, ten_shape(10, 10));
-    for(int i = 0; i < 10; i++) {
-        for(int j = 0; j < 10; j++) {
-            ten_index(temp_arena, a, i).data[j] = i * 10 + j;
-        }
-    }
+int main(int argc, char **argv) {
+    temp_arena = arena_new(1 * Gb);
 
     if (!file_exists("mnist/train-labels.idx1-ubyte")) {
         printf("Please download mnist dataset\n");
@@ -38,38 +34,37 @@ int main(int argc, char **argv) {
             assert(magic == 2049);
             item_count = stream_read_uint32_bigendian(&labels_stream);
 
-            train_labels = ten_new(train_arena, ten_shape(item_count, 10));
+            train_labels = ten_new(train_arena, tenshape(item_count, 10));
             for(int i = 0; i < item_count; i++) {
                 uint8_t label = stream_read_uint8(&labels_stream);
-                ten_index(data_temp, train_labels, i).data[label] = 1.0f;
+                ten_index(train_labels, i).data[label] = 1.0f;
             }
         }
 
+        arena_reset(temp_arena);
         arena_reset(data_temp);
+
         {
             String inputs_data = file_load(data_temp, "mnist/train-images.idx3-ubyte");
             ByteStream stream = stream_string(data_temp, inputs_data);
             uint32_t magic = stream_read_uint32_bigendian(&stream);
             assert(magic == 0x00000803);
             uint32_t item_count = stream_read_uint32_bigendian(&stream);
-            assert(item_count == train_labels.shape.shape[0]);
+            assert(item_count == train_labels.shape.dims[0]);
             uint32_t rows = stream_read_uint32_bigendian(&stream);
             assert(rows == 28);
             uint32_t cols = stream_read_uint32_bigendian(&stream);
             assert(cols == 28);
 
-            train_inputs = ten_new(train_arena, ten_shape(item_count, 28, 28));
-            Arena *imgdims = arena_new(128 * 28 * Kb);
+            train_inputs = ten_new(train_arena, tenshape(item_count, 28, 28));
             for(int i = 0; i < item_count; i++) {
-                Tensor image = ten_index(imgdims, train_inputs, i);
+                Tensor image = ten_index(train_inputs, i);
                 for(int row = 0; row < 28; row++) {
                     for(int col = 0; col < 28; col++) {
-                        ten_index(imgdims, image, row).data[col] = (float)stream_read_uint8(&stream) / 255.0f;
+                        ten_index(image, row).data[col] = (float)stream_read_uint8(&stream) / 255.0f;
                     }
                 }
-                arena_reset(imgdims);
             }
-            arena_destroy(&imgdims);
         }
 
         arena_destroy(&data_temp);
@@ -97,18 +92,18 @@ int main(int argc, char **argv) {
     int input_size = 28 * 28;
     int hidden_size = 128;  // Hidden layer size
     int num_classes = 10;
-    int train_count = train_inputs.shape.shape[0];
+    int train_count = train_inputs.shape.dims[0];
     int test_count = train_count / 10; // 10% for test
     int actual_train_count = train_count - test_count;
 
     // Flatten train_inputs to (train_count, 784)
     Arena *flat_arena = arena_new(256 * Mb);
-    Tensor flat_inputs = ten_new(flat_arena, ten_shape(train_count, input_size));
+    Tensor flat_inputs = ten_new(flat_arena, tenshape(train_count, input_size));
     for (int i = 0; i < train_count; i++) {
-        Tensor img = ten_index(temp_arena, train_inputs, i);
-        Tensor flat_row = ten_index(temp_arena, flat_inputs, i);
+        Tensor img = ten_index(train_inputs, i);
+        Tensor flat_row = ten_index(flat_inputs, i);
         for (int row = 0; row < 28; row++) {
-            Tensor img_row = ten_index(temp_arena, img, row);
+            Tensor img_row = ten_index(img, row);
             for (int col = 0; col < 28; col++) {
                 flat_row.data[row * 28 + col] = img_row.data[col];
             }
@@ -117,20 +112,20 @@ int main(int argc, char **argv) {
 
     // Split into train and test sets
     Tensor X_train = flat_inputs;
-    Tensor X_test = ten_new(temp_arena, ten_shape(test_count, input_size));
+    Tensor X_test = ten_new(temp_arena, tenshape(test_count, input_size));
     Tensor y_train = train_labels;
-    Tensor y_test = ten_new(temp_arena, ten_shape(test_count, num_classes));
+    Tensor y_test = ten_new(temp_arena, tenshape(test_count, num_classes));
     
     // Copy test data to separate tensors
     for (int i = 0; i < test_count; i++) {
-        Tensor src_row = ten_index(temp_arena, flat_inputs, actual_train_count + i);
-        Tensor dst_row = ten_index(temp_arena, X_test, i);
+        Tensor src_row = ten_index(flat_inputs, actual_train_count + i);
+        Tensor dst_row = ten_index(X_test, i);
         for (int j = 0; j < input_size; j++) {
             dst_row.data[j] = src_row.data[j];
         }
         
-        Tensor src_label = ten_index(temp_arena, train_labels, actual_train_count + i);
-        Tensor dst_label = ten_index(temp_arena, y_test, i);
+        Tensor src_label = ten_index(train_labels, actual_train_count + i);
+        Tensor dst_label = ten_index(y_test, i);
         for (int j = 0; j < num_classes; j++) {
             dst_label.data[j] = src_label.data[j];
         }
@@ -138,11 +133,11 @@ int main(int argc, char **argv) {
 
     // --- Neural Network weights and biases ---
     // Layer 1: input -> hidden
-    Tensor W1 = ten_new(temp_arena, ten_shape(input_size, hidden_size));
-    Tensor b1 = ten_new(temp_arena, ten_shape(hidden_size));
+    Tensor W1 = ten_new(temp_arena, tenshape(input_size, hidden_size));
+    Tensor b1 = ten_new(temp_arena, tenshape(hidden_size));
     // Layer 2: hidden -> output
-    Tensor W2 = ten_new(temp_arena, ten_shape(hidden_size, num_classes));
-    Tensor b2 = ten_new(temp_arena, ten_shape(num_classes));
+    Tensor W2 = ten_new(temp_arena, tenshape(hidden_size, num_classes));
+    Tensor b2 = ten_new(temp_arena, tenshape(num_classes));
     
     // Initialize weights and biases
     srand(42);
@@ -166,17 +161,21 @@ int main(int argc, char **argv) {
             int current_batch_size = (batch_start + batch_size <= actual_train_count) ? 
                                    batch_size : actual_train_count - batch_start;
             
+            if(rand() % 100 == 0) {
+                printf("Progress through epoch: %.1f%%\n", 100.0f * (float)batch_start / actual_train_count);
+            }
+            
             // Create batch tensors
-            Tensor batch_inputs = ten_new(temp_arena, ten_shape(current_batch_size, input_size));
-            Tensor batch_labels = ten_new(temp_arena, ten_shape(current_batch_size, num_classes));
+            Tensor batch_inputs = ten_new(temp_arena, tenshape(current_batch_size, input_size));
+            Tensor batch_labels = ten_new(temp_arena, tenshape(current_batch_size, num_classes));
             
             // Fill batch with data
             for (int b = 0; b < current_batch_size; b++) {
                 int idx = batch_start + b;
-                Tensor x = ten_index(temp_arena, X_train, idx);
-                Tensor y = ten_index(temp_arena, y_train, idx);
-                Tensor batch_x = ten_index(temp_arena, batch_inputs, b);
-                Tensor batch_y = ten_index(temp_arena, batch_labels, b);
+                Tensor x = ten_index(X_train, idx);
+                Tensor y = ten_index(y_train, idx);
+                Tensor batch_x = ten_index(batch_inputs, b);
+                Tensor batch_y = ten_index(batch_labels, b);
                 
                 // Copy input data
                 for (int j = 0; j < input_size; j++) {
@@ -202,14 +201,14 @@ int main(int argc, char **argv) {
             float batch_loss = 0.0f;
             int batch_correct = 0;
             for (int b = 0; b < current_batch_size; b++) {
-                Tensor sample_logits = ten_index(temp_arena, batch_logits, b);
-                Tensor sample_label = ten_index(temp_arena, batch_labels, b);
-                int label = ten_argmax(sample_label);
+                Tensor sample_logits = ten_index(batch_logits, b);
+                Tensor sample_label = ten_index(batch_labels, b);
+                int label = (int)ten_argmax(temp_arena, sample_label).data[0];
                 
                 float sample_loss = ten_softmax_loss(sample_logits, label);
                 batch_loss += sample_loss;
                 
-                int pred = ten_argmax(sample_logits);
+                int pred = (int)ten_argmax(temp_arena, sample_logits).data[0];
                 if (pred == label) batch_correct++;
             }
             loss += batch_loss;
@@ -218,12 +217,12 @@ int main(int argc, char **argv) {
             // Backward pass - Gradient wrt logits
             Tensor grad_logits = ten_new(temp_arena, batch_logits.shape);
             for (int b = 0; b < current_batch_size; b++) {
-                Tensor sample_logits = ten_index(temp_arena, batch_logits, b);
-                Tensor sample_label = ten_index(temp_arena, batch_labels, b);
-                int label = ten_argmax(sample_label);
+                Tensor sample_logits = ten_index(batch_logits, b);
+                Tensor sample_label = ten_index(batch_labels, b);
+                int label = (int)ten_argmax(temp_arena, sample_label).data[0];
                 
                 Tensor sample_grad = ten_softmax_gradients(temp_arena, sample_logits, label);
-                Tensor grad_slice = ten_index(temp_arena, grad_logits, b);
+                Tensor grad_slice = ten_index(grad_logits, b);
                 
                 for (int j = 0; j < num_classes; j++) {
                     grad_slice.data[j] = sample_grad.data[j];
@@ -248,7 +247,7 @@ int main(int argc, char **argv) {
             }
             
             // Gradient wrt hidden layer (before ReLU)
-            Tensor grad_hidden = ten_new(temp_arena, ten_shape(current_batch_size, hidden_size));
+            Tensor grad_hidden = ten_new(temp_arena, tenshape(current_batch_size, hidden_size));
             for (int b = 0; b < current_batch_size; b++) {
                 for (int j = 0; j < hidden_size; j++) {
                     for (int k = 0; k < num_classes; k++) {
@@ -263,8 +262,8 @@ int main(int argc, char **argv) {
             ten_add_bias(batch_hidden_before_relu, b1);
             
             for (int b = 0; b < current_batch_size; b++) {
-                Tensor hidden_slice = ten_index(temp_arena, batch_hidden_before_relu, b);
-                Tensor grad_slice = ten_index(temp_arena, grad_hidden, b);
+                Tensor hidden_slice = ten_index(batch_hidden_before_relu, b);
+                Tensor grad_slice = ten_index(grad_hidden, b);
                 
                 for (int j = 0; j < hidden_size; j++) {
                     grad_slice.data[j] *= relu_gradient(hidden_slice.data[j]);
@@ -287,19 +286,18 @@ int main(int argc, char **argv) {
                 }
                 b1.data[j] -= lr * grad_b1;
             }
+            arena_reset(temp_arena);
         }
         
         float acc = (float)correct / actual_train_count;
         printf("Epoch %d: loss=%.4f, acc=%.4f\n", epoch+1, loss/actual_train_count, acc);
         
-        // Evaluate on test set
         int test_correct = 0;
         for (int i = 0; i < test_count; i++) {
-            Tensor x = ten_index(temp_arena, X_test, i);
-            Tensor y = ten_index(temp_arena, y_test, i);
+            Tensor x = ten_index(X_test, i);
+            Tensor y = ten_index(y_test, i);
             
-            // Forward pass for testing
-            Tensor hidden = ten_new(temp_arena, ten_shape(hidden_size));
+            Tensor hidden = ten_new(temp_arena, tenshape(hidden_size));
             for (int j = 0; j < hidden_size; j++) {
                 for (int k = 0; k < input_size; k++) {
                     hidden.data[j] += x.data[k] * W1.data[k * hidden_size + j];
@@ -308,7 +306,7 @@ int main(int argc, char **argv) {
             }
             ten_relu(hidden);
             
-            Tensor logits_tensor = ten_new(temp_arena, ten_shape(num_classes));
+            Tensor logits_tensor = ten_new(temp_arena, tenshape(num_classes));
             for (int j = 0; j < num_classes; j++) {
                 for (int k = 0; k < hidden_size; k++) {
                     logits_tensor.data[j] += hidden.data[k] * W2.data[k * num_classes + j];
@@ -316,9 +314,10 @@ int main(int argc, char **argv) {
                 logits_tensor.data[j] += b2.data[j];
             }
             
-            int label = ten_argmax(y);
-            int pred = ten_argmax(logits_tensor);
+            int label = (int)ten_argmax(temp_arena, y).data[0];
+            int pred = (int)ten_argmax(temp_arena, logits_tensor).data[0];
             if (pred == label) test_correct++;
+            arena_reset(temp_arena);
         }
         float test_acc = (float)test_correct / test_count;
         printf("Test accuracy: %.4f\n", test_acc);
