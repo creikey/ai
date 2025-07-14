@@ -33,6 +33,15 @@ uint64_t tenshape_count(TensorShape shape) {
     return result;
 }
 
+TensorShape tenshape_prepend(TensorShape shape, uint64_t dim) {
+    TensorShape result = {0};
+    result.rank = shape.rank + 1;
+    result.dims = arena_alloc(temp_arena, sizeof(uint64_t) * result.rank);
+    result.dims[0] = dim;
+    memcpy(result.dims + 1, shape.dims, sizeof(uint64_t) * shape.rank);
+    return result;
+}
+
 typedef struct Tensor {
     float32_t *data;
     TensorShape shape;
@@ -113,6 +122,13 @@ Tensor ten_clone(Arena *arena, Tensor tensor) {
     Tensor result = ten_new(arena, tensor.shape);
     memcpy(result.data, tensor.data, sizeof(float) * tenshape_count(tensor.shape));
     result.shape = tenshape_clone(arena, tensor.shape);
+    return result;
+}
+
+Tensor ten_clip_upto(Arena *shape_arena, Tensor tensor, uint64_t max) {
+    Tensor result = tensor;
+    result.shape = tenshape_clone(shape_arena, tensor.shape);
+    result.shape.dims[0] = max;
     return result;
 }
 
@@ -387,4 +403,35 @@ void ten_add_bias(Tensor activations, Tensor bias) {
     } else {
         assert(false && "Unsupported tensor shapes for bias addition");
     }
+}
+
+Tensor ten_transpose(Arena *arena, Tensor tensor) {
+    assert(tensor.shape.rank == 2);
+    int rows = tensor.shape.dims[0];
+    int cols = tensor.shape.dims[1];
+    Tensor result = ten_new(arena, tenshape(cols, rows));
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            result.data[j * rows + i] = tensor.data[i * cols + j];
+        }
+    }
+    return result;
+}
+
+Tensor ten_equal(Arena *arena, Tensor a, Tensor b) {
+    assert(a.shape.rank == b.shape.rank);
+    assert(tenshape_count(a.shape) == tenshape_count(b.shape));
+    Tensor result = ten_new(arena, tenshape_clone(arena, a.shape));
+    for(int i = 0; i < tenshape_count(a.shape); i++) {
+        result.data[i] = a.data[i] == b.data[i];
+    }
+    return result;
+}
+
+float ten_sum(Tensor tensor) {
+    float result = 0.0f;
+    for(int i = 0; i < tenshape_count(tensor.shape); i++) {
+        result += tensor.data[i];
+    }
+    return result;
 }

@@ -87,6 +87,9 @@ int main(int argc, char **argv) {
     }
     */
 
+    // clip some mnist training data
+    train_inputs = ten_clip_upto(train_arena, train_inputs, (int)(0.5f * train_inputs.shape.dims[0]));
+
     // After MNIST loading, add perceptron implementation
     // --- Neural Network parameters ---
     int input_size = 28 * 28;
@@ -150,7 +153,6 @@ int main(int argc, char **argv) {
     int epochs = 3;
     float lr = 0.001f;
     int batch_size = 32; // Batch size for training
-    float best_acc = 0.0f;
     
     for (int epoch = 0; epoch < epochs; epoch++) {
         float loss = 0.0f;
@@ -293,37 +295,23 @@ int main(int argc, char **argv) {
         printf("Epoch %d: loss=%.4f, acc=%.4f\n", epoch+1, loss/actual_train_count, acc);
         
         int test_correct = 0;
-        for (int i = 0; i < test_count; i++) {
-            Tensor x = ten_index(X_test, i);
-            Tensor y = ten_index(y_test, i);
-            
-            Tensor hidden = ten_new(temp_arena, tenshape(hidden_size));
-            for (int j = 0; j < hidden_size; j++) {
-                for (int k = 0; k < input_size; k++) {
-                    hidden.data[j] += x.data[k] * W1.data[k * hidden_size + j];
-                }
-                hidden.data[j] += b1.data[j];
-            }
-            ten_relu(hidden);
-            
-            Tensor logits_tensor = ten_new(temp_arena, tenshape(num_classes));
-            for (int j = 0; j < num_classes; j++) {
-                for (int k = 0; k < hidden_size; k++) {
-                    logits_tensor.data[j] += hidden.data[k] * W2.data[k * num_classes + j];
-                }
-                logits_tensor.data[j] += b2.data[j];
-            }
-            
-            int label = (int)ten_argmax(temp_arena, y).data[0];
-            int pred = (int)ten_argmax(temp_arena, logits_tensor).data[0];
-            if (pred == label) test_correct++;
+        {
             arena_reset(temp_arena);
+            Tensor y_test_indices = ten_argmax(temp_arena, y_test);
+            Tensor h1 = ten_matmul(temp_arena, X_test, W1);
+            ten_add_bias(h1, b1);
+            ten_relu(h1);
+            Tensor h2 = ten_matmul(temp_arena, h1, W2);
+            ten_add_bias(h2, b2);
+            Tensor preds = ten_argmax(temp_arena, h2);
+            Tensor eq = ten_equal(temp_arena, preds, y_test_indices);
+            test_correct = (int)ten_sum(eq);
         }
         float test_acc = (float)test_correct / test_count;
         printf("Test accuracy: %.4f\n", test_acc);
-        if (test_acc > best_acc) best_acc = test_acc;
+
+        arena_reset(temp_arena);
     }
-    printf("Best test accuracy: %.4f\n", best_acc);
     arena_destroy(&flat_arena);
     return 0;
 }
