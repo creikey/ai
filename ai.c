@@ -125,10 +125,14 @@ Tensor ten_clone(Arena *arena, Tensor tensor) {
     return result;
 }
 
-Tensor ten_clip_upto(Arena *shape_arena, Tensor tensor, uint64_t max) {
-    Tensor result = tensor;
-    result.shape = tenshape_clone(shape_arena, tensor.shape);
-    result.shape.dims[0] = max;
+// slices on the first dim
+Tensor ten_slice(Arena *shape_arena, Tensor tensor, uint64_t start, uint64_t end) {
+    assert(start < end);
+    assert(start < tensor.shape.dims[0]);
+    assert(end <= tensor.shape.dims[0]);
+    Tensor result = {.data = tensor.data, .shape = tenshape_clone(shape_arena, tensor.shape)};
+    result.data = tensor.data + start * ten_stride(tensor, 0);
+    result.shape.dims[0] = end - start;
     return result;
 }
 

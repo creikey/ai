@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
     */
 
     // clip some mnist training data
-    train_inputs = ten_clip_upto(train_arena, train_inputs, (int)(0.5f * train_inputs.shape.dims[0]));
+    train_inputs = ten_slice(train_arena, train_inputs, 0, (int)(0.5f * train_inputs.shape.dims[0]));
 
     // After MNIST loading, add perceptron implementation
     // --- Neural Network parameters ---
@@ -168,27 +168,8 @@ int main(int argc, char **argv) {
             }
             
             // Create batch tensors
-            Tensor batch_inputs = ten_new(temp_arena, tenshape(current_batch_size, input_size));
-            Tensor batch_labels = ten_new(temp_arena, tenshape(current_batch_size, num_classes));
-            
-            // Fill batch with data
-            for (int b = 0; b < current_batch_size; b++) {
-                int idx = batch_start + b;
-                Tensor x = ten_index(X_train, idx);
-                Tensor y = ten_index(y_train, idx);
-                Tensor batch_x = ten_index(batch_inputs, b);
-                Tensor batch_y = ten_index(batch_labels, b);
-                
-                // Copy input data
-                for (int j = 0; j < input_size; j++) {
-                    batch_x.data[j] = x.data[j];
-                }
-                
-                // Copy label data
-                for (int j = 0; j < num_classes; j++) {
-                    batch_y.data[j] = y.data[j];
-                }
-            }
+            Tensor batch_inputs = ten_slice(temp_arena, X_train, batch_start, batch_start + current_batch_size);
+            Tensor batch_labels = ten_slice(temp_arena, y_train, batch_start, batch_start + current_batch_size);
             
             // Forward pass - Layer 1: hidden = relu(batch_inputs * W1 + b1)
             Tensor batch_hidden = ten_matmul(temp_arena, batch_inputs, W1);
