@@ -54,7 +54,7 @@ void *arena_alloc(Arena *arena, uint64_t size) {
 Arena *arena_subarena(Arena *arena, uint64_t size) {
     Arena *subarena = (Arena *)arena_alloc(arena, sizeof(Arena));
     uint8_t *data = arena_alloc(arena, size);
-    subarena->mem = (uint8_t *)arena->mem + arena->next;
+    subarena->mem = data;
     subarena->next = 0;
     subarena->size = size;
     return subarena;
